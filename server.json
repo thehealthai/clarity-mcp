@@ -3,7 +3,7 @@
   "name": "com.healthai/clarity",
   "title": "Clarity by Health AI",
   "description": "Condition-aware ingredient & product safety for AI agents: verdict, evidence tier, citations.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "websiteUrl": "https://healthai.com/clarity/api",
   "repository": {
     "url": "https://github.com/Al-source-web/clarity-mcp",

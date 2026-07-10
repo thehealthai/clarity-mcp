@@ -52,6 +52,27 @@ simple = { limit = 60, period = 60 }
 name = "RATE_DO"
 class_name = "RateLimiter"
 
+# Durable outage latch for the healthcheck cron (alert once per outage).
+[[durable_objects.bindings]]
+name = "OPS_LATCH"
+class_name = "OpsLatch"
+
 [[migrations]]
 tag = "v1-ratelimiter"
 new_sqlite_classes = ["RateLimiter"]
+
+[[migrations]]
+tag = "v2-opslatch"
+new_sqlite_classes = ["OpsLatch"]
+
+# Cross-monitoring: this cron probes the sibling radar MCP and emails on
+# failure/recovery (radar's own */15 cron probes THIS worker — a worker
+# cannot fetch its own custom domain, so each watches the other).
+# Extra secrets for alerting + /register receipts (set via wrangler secret put):
+#   RESEND_API_KEY, DIGEST_TO, DIGEST_FROM (optional)
+[triggers]
+crons = ["*/15 * * * *"]
+
+# Workers Logs — errors were previously invisible.
+[observability]
+enabled = true

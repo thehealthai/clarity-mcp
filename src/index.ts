@@ -34,6 +34,12 @@ import { looksLikeProbiotic, fetchProbioticSignals } from "./probiotic-signals";
 export interface Env {
   SUPABASE_URL: string;
   SUPABASE_SERVICE_KEY: string;
+  // Uptime alerting for the sibling radar MCP (cross-monitoring: radar's cron
+  // watches this worker, this worker's cron watches radar — a worker cannot
+  // fetch its own custom domain). Reuses the radar Resend account.
+  RESEND_API_KEY?: string;
+  DIGEST_TO?: string;
+  DIGEST_FROM?: string;
   // Workers Analytics Engine (optional binding) — per-tool usage telemetry.
   MCP_ANALYTICS?: { writeDataPoint(point: { blobs?: string[]; doubles?: number[]; indexes?: string[] }): void };
   // Cloudflare rate-limiting binding — cheap first-pass burst filter only.
@@ -46,19 +52,44 @@ export interface Env {
     idFromName(name: string): unknown;
     get(id: unknown): { fetch(url: string): Promise<Response> };
   };
+  // Durable, storage-backed outage latch for the healthcheck cron (alert once
+  // per outage + once on recovery, no repeats).
+  OPS_LATCH?: {
+    idFromName(name: string): unknown;
+    get(id: unknown): { fetch(url: string): Promise<Response> };
+  };
 }
 
 // Globally-unique per-key sliding-window counter. In-memory state may reset
 // if the DO hibernates after idle gaps — which only ever FORGIVES a caller,
-// never over-blocks. Acceptable for abuse control.
+// never over-blocks. Acceptable for abuse control. Defaults preserve the
+// original 60/min contract; callers may pass ?limit=&window= (ms) for other
+// budgets (e.g. /register uses 3/day per IP on its own DO instance).
 export class RateLimiter {
   private hits: number[] = [];
-  async fetch(): Promise<Response> {
+  async fetch(req: Request): Promise<Response> {
+    const u = new URL(req.url);
+    const limit = Math.max(1, Number(u.searchParams.get("limit")) || 60);
+    const windowMs = Math.max(1000, Number(u.searchParams.get("window")) || 60_000);
     const now = Date.now();
-    this.hits = this.hits.filter((t) => now - t < 60_000);
-    if (this.hits.length >= 60) return new Response("deny", { status: 429 });
+    this.hits = this.hits.filter((t) => now - t < windowMs);
+    if (this.hits.length >= limit) return new Response("deny", { status: 429 });
     this.hits.push(now);
     return new Response("allow");
+  }
+}
+
+// Durable boolean latch keyed by ?key= — survives hibernation (ctx.storage),
+// so "did we already alert for this outage" is exact across cron firings.
+export class OpsLatch {
+  constructor(private ctx: { storage: { get(k: string): Promise<unknown>; put(k: string, v: unknown): Promise<void>; delete(k: string): Promise<void> } }) {}
+  async fetch(req: Request): Promise<Response> {
+    const u = new URL(req.url);
+    const key = u.searchParams.get("key") || "default";
+    if (u.pathname === "/get") return new Response(String((await this.ctx.storage.get(key)) ?? ""));
+    if (u.pathname === "/set") { await this.ctx.storage.put(key, new Date().toISOString()); return new Response("ok"); }
+    if (u.pathname === "/clear") { await this.ctx.storage.delete(key); return new Response("ok"); }
+    return new Response("bad request", { status: 400 });
   }
 }
 
@@ -67,7 +98,7 @@ export class RateLimiter {
 const DISCLAIMER =
   "Informational only — not medical advice. Where a verified citation exists it is surfaced with the claim; verify cited sources before acting. Consult a clinician for medical decisions.";
 
-const SERVER_INFO = { name: "clarity-mcp", version: "0.5.0" };
+const SERVER_INFO = { name: "clarity-mcp", version: "0.5.1" };
 const PROTOCOL_VERSION = "2025-06-18";
 
 const IV_FIELDS = [
@@ -1045,6 +1076,138 @@ async function enforceLimit(request: Request, env: Env): Promise<{ status: numbe
   return null;
 }
 
+// --- Self-serve API key issuance (POST /register) ---------------------------
+// Seamless keyed tier: email in → key out (shown once; hash stored in the
+// shared api_keys table, so the same key also works on the radar MCP).
+// Abuse control: 3 registrations/day per IP via a dedicated RateLimiter DO
+// instance. Deliberately NOT OAuth — anonymous use stays zero-friction and
+// scanners already (correctly) read this server as no-auth.
+const REGISTER_TIER = { tier: "free", monthly_limit: 10000 };
+
+function generateApiKey(): string {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return "hai_" + Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function handleRegister(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+  let body: { email?: string; name?: string };
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: "JSON body required: {\"email\": \"you@example.com\", \"name\": \"optional\"}" }, { status: 400, headers: cors });
+  }
+  const email = String(body.email || "").trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email) || email.length > 254) {
+    return Response.json({ error: "a valid email is required" }, { status: 400, headers: cors });
+  }
+  const ip = clientIp(request);
+  if (env.RATE_DO) {
+    try {
+      const stub = env.RATE_DO.get(env.RATE_DO.idFromName(`reg:${ip}`));
+      const res = await stub.fetch("https://rl/?limit=3&window=86400000");
+      if (res.status === 429) {
+        return Response.json({ error: "registration limit reached (3/day per IP) — email hello@healthai.com for help" }, { status: 429, headers: cors });
+      }
+    } catch { /* DO trouble must not block registration */ }
+  }
+
+  const apiKey = generateApiKey();
+  const keyHash = await sha256Hex(apiKey);
+  const ins = await fetch(`${env.SUPABASE_URL}/rest/v1/api_keys`, {
+    method: "POST",
+    headers: { ...readHeaders(env), "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: JSON.stringify({
+      key_hash: keyHash,
+      owner_email: email,
+      owner_name: body.name ? String(body.name).slice(0, 120) : null,
+      tier: REGISTER_TIER.tier,
+      monthly_limit: REGISTER_TIER.monthly_limit,
+      requests_this_month: 0,
+      is_active: true,
+      notes: "self-serve via mcp.healthai.com/register",
+    }),
+  }).catch(() => null);
+  if (!ins || !ins.ok) {
+    return Response.json({ error: "could not create key right now — try again or email hello@healthai.com" }, { status: 503, headers: cors });
+  }
+
+  // Best-effort receipt email; the response below is the source of truth.
+  if (env.RESEND_API_KEY) {
+    fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: env.DIGEST_FROM ?? "Health AI MCP <onboarding@resend.dev>",
+        to: [email],
+        subject: "Your Health AI MCP API key",
+        html: `<p>Your API key (store it now — we only keep a hash):</p><pre>${apiKey}</pre>` +
+          `<p>Send it as an <code>X-API-Key</code> header to <b>mcp.healthai.com</b> (Clarity) and <b>radar.healthai.com/api/mcp</b> (483 Risk Radar). ` +
+          `Tier: ${REGISTER_TIER.tier}, ${REGISTER_TIER.monthly_limit.toLocaleString()} requests/month. Questions: hello@healthai.com</p>`,
+      }),
+    }).catch(() => { /* receipt is best-effort */ });
+  }
+
+  return Response.json({
+    api_key: apiKey,
+    note: "Store this now — only a hash is kept and it cannot be shown again.",
+    usage: "Send as X-API-Key header. Works on both mcp.healthai.com and radar.healthai.com/api/mcp.",
+    tier: REGISTER_TIER.tier,
+    monthly_limit: REGISTER_TIER.monthly_limit,
+  }, { status: 201, headers: cors });
+}
+
+// --- Cross-monitoring: watch the sibling radar MCP ---------------------------
+// Fired by the cron trigger. Alerts once per outage and once on recovery
+// (durable OpsLatch), to the same inbox as radar's digests.
+async function sendOpsEmail(env: Env, subject: string, html: string): Promise<boolean> {
+  if (!env.RESEND_API_KEY || !env.DIGEST_TO) return false;
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      from: env.DIGEST_FROM ?? "Clarity MCP <onboarding@resend.dev>",
+      to: [env.DIGEST_TO],
+      subject,
+      html,
+    }),
+  }).catch(() => null);
+  return Boolean(res?.ok);
+}
+
+async function checkRadarHealth(env: Env): Promise<void> {
+  const name = "483 Risk Radar MCP (radar.healthai.com/api/mcp)";
+  let ok = false;
+  let detail = "";
+  try {
+    const res = await fetch("https://radar.healthai.com/api/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const text = res.ok ? await res.text() : "";
+    ok = res.ok && text.includes("device_risk_lookup");
+    detail = res.ok ? (ok ? "ok" : `HTTP 200 but tools/list unrecognized: ${text.slice(0, 200)}`) : `HTTP ${res.status}`;
+  } catch (e) {
+    detail = `fetch failed: ${(e as Error).message}`;
+  }
+
+  if (!env.OPS_LATCH) return; // no latch binding — skip alerting rather than spam
+  const latch = env.OPS_LATCH.get(env.OPS_LATCH.idFromName("healthcheck"));
+  const latched = await latch.fetch("https://ops/get?key=radar").then((r) => r.text()).catch(() => "");
+  if (!ok && !latched) {
+    const sent = await sendOpsEmail(env, `MCP DOWN: ${name}`,
+      `<p><b>${name}</b> failed its health check (probe runs on clarity-mcp).</p><p>Detail: ${detail}</p>` +
+        `<p>Checked ${new Date().toISOString()}. One alert per outage; a recovery email follows when it passes again.</p>`);
+    if (sent) await latch.fetch("https://ops/set?key=radar").catch(() => {});
+  } else if (ok && latched) {
+    await sendOpsEmail(env, `MCP recovered: ${name}`,
+      `<p><b>${name}</b> is healthy again (${new Date().toISOString()}; down since ${latched}).</p>`);
+    await latch.fetch("https://ops/clear?key=radar").catch(() => {});
+  }
+}
+
 function isToolCall(body: any): boolean {
   const msgs = Array.isArray(body) ? body : [body];
   return msgs.some((m) => m && m.method === "tools/call");
@@ -1125,7 +1288,7 @@ const INFO_HTML = `<!doctype html>
 <p class="note">List tools with <code>{"method":"tools/list"}</code>. Condition lenses: breastfeeding, pregnancy, histamine, mcas, rosacea, hs, allergy, fertility, toddler.</p>
 
 <h2>Access</h2>
-<p class="note"><b>Free</b>, 60 tool calls/min per client. Send an <code>X-API-Key</code> header for higher, metered limits. Bulk snapshots &amp; high-volume commercial access are licensed — <a href="mailto:hello@healthai.com">hello@healthai.com</a>.</p>
+<p class="note"><b>Free</b>, 60 tool calls/min per client. For higher, metered limits get a key instantly — <code>curl -X POST https://mcp.healthai.com/register -d '{"email":"you@example.com"}'</code> — and send it as an <code>X-API-Key</code> header (works here and on <a href="https://radar.healthai.com/api/mcp">483 Risk Radar MCP</a>). Bulk snapshots &amp; high-volume commercial access are licensed — <a href="mailto:hello@healthai.com">hello@healthai.com</a>.</p>
 
 <footer>
   Informational only — <b>not medical advice</b>. Evidence states are disclosed per claim; verify cited sources before acting. Consult a clinician for medical decisions.<br>
@@ -1155,6 +1318,7 @@ export default {
           transport: "streamable-http",
           tools: TOOLS.map((t) => ({ name: t.name, description: t.description })),
           documentation: "https://healthai.com/clarity/api/",
+          registration: "POST /register {email} → X-API-Key for higher metered limits (also valid on radar.healthai.com/api/mcp)",
           contact: "hello@healthai.com",
         }, { headers: cors });
       }
@@ -1170,6 +1334,10 @@ export default {
     }
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405, headers: cors });
+    }
+    // Self-serve API key issuance — plain JSON endpoint, not JSON-RPC.
+    if (new URL(request.url).pathname === "/register") {
+      return handleRegister(request, env, cors);
     }
     let body: any;
     try {
@@ -1198,5 +1366,10 @@ export default {
     const result = await handleRpc(env, body, keyed, caller);
     if (result === null) return new Response(null, { status: 202, headers: cors });
     return Response.json(result, { headers: cors });
+  },
+
+  // Cross-monitor the sibling radar MCP (radar's cron watches this worker).
+  async scheduled(_controller: unknown, env: Env, ctx: { waitUntil(p: Promise<unknown>): void }): Promise<void> {
+    ctx.waitUntil(checkRadarHealth(env));
   },
 };
