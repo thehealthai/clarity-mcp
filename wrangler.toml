@@ -1,0 +1,57 @@
+# clarity-mcp — Model Context Protocol server for Clarity's ingredient DB.
+#
+# Exposes three MCP tools over Streamable HTTP (JSON-RPC 2.0) at POST /:
+#   check_ingredient(name, lens)   -> verdict + evidence tier + citation
+#   strain_lookup(species)         -> cannabis/mushroom verdict + tier + citation
+#   scan_barcode(barcode, lens)    -> product-level verdict from OFF/OBF + iv match
+#
+# Reuses the Supabase-REST query pattern from workers/clarity-check and the
+# OFF/OBF barcode lookup from workers/clarity-services.
+#
+# DELIBERATELY NO routes block yet (same canary discipline as clarity-check):
+# first deploy is unrouted -> a workers.dev URL for live verification with zero
+# production traffic. Production flip later adds ONE of:
+#   routes = [{ pattern = "mcp.healthai.com/*", zone_name = "healthai.com" }]
+#   routes = [{ pattern = "healthai.com/mcp*", zone_name = "healthai.com" }]
+#
+# Secret (set via `npx wrangler secret put`, never in this file):
+#   SUPABASE_SERVICE_KEY
+
+name = "clarity-mcp"
+main = "src/index.ts"
+compatibility_date = "2026-06-01"
+workers_dev = true
+
+# Production domain (flipped 2026-07-05 after verify checklist passed against
+# the workers.dev URL). Custom domain = DNS + cert auto-provisioned.
+# Rollback = delete this block + redeploy.
+routes = [
+  { pattern = "mcp.healthai.com", custom_domain = true },
+]
+
+[vars]
+SUPABASE_URL = "https://YOUR-PROJECT.supabase.co"
+
+# Per-tool usage telemetry (which tools get called, keyed vs anon, by lens).
+# Query later via the Analytics Engine SQL API.
+[[analytics_engine_datasets]]
+binding = "MCP_ANALYTICS"
+dataset = "clarity_mcp_calls"
+
+# Anonymous rate limiting, two layers (both empirically burst-tested):
+#  1. Native ratelimit binding — counters are per-SERVER within a colo
+#     (100-req bursts passed untouched), so it's only a cheap first filter.
+#  2. RateLimiter Durable Object — one instance per IP, globally unique,
+#     exact. This is the enforcement layer.
+[[ratelimits]]
+name = "ANON_RL"
+namespace_id = "1001"
+simple = { limit = 60, period = 60 }
+
+[[durable_objects.bindings]]
+name = "RATE_DO"
+class_name = "RateLimiter"
+
+[[migrations]]
+tag = "v1-ratelimiter"
+new_sqlite_classes = ["RateLimiter"]
