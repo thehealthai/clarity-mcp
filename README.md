@@ -1,5 +1,7 @@
 # Clarity MCP — `com.healthai/clarity`
 
+[![MCP Queen grade](https://mcpqueen.com/badge/com.healthai/clarity.svg)](https://mcpqueen.com/s/com.healthai/clarity)
+
 Condition-aware ingredient & product safety intelligence for AI agents. Every
 answer carries a **verdict**, an **evidence tier** (Gold / Silver / Bronze), and
 a **citation** — curated against authoritative sources (LactMed, InfantRisk,
