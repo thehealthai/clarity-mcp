@@ -835,7 +835,7 @@ async function scoreProduct(env: Env, barcode: string, category: string, lens: s
   }
 
   // Per-lens Clarity fit (matched/unmatched coverage — the honest confidence).
-  // Select only scalar columns — the `result` jsonb blob holds internal URLs.
+  // Select only scalar columns — the `result` jsonb blob is not client-facing.
   if (lens) {
     const bs = (await fetchRows(env,
       `${env.SUPABASE_URL}/rest/v1/barcode_scan_scores?select=total,matched,ambiguous,unmatched,overall,lens_overall&barcode=eq.${code}&lens=eq.${encodeURIComponent(lens)}&limit=1`))[0];
