@@ -36,7 +36,7 @@ config's `mcpServers`:
 For older clients without native remote support, bridge with `mcp-remote`:
 `"command": "npx", "args": ["-y", "mcp-remote", "https://mcp.healthai.com"]`.
 
-## Tools (6)
+## Tools (9)
 
 | Tool | What it answers |
 |---|---|
@@ -46,14 +46,23 @@ For older clients without native remote support, bridge with `mcp-remote`:
 | `validate_claim` | Fact-check a free-text health claim against Clarity's curated position — supports / contradicts / does-not-cover, with citation |
 | `check_interaction` | Curated ingredient-to-ingredient interactions — type, severity, mechanism, clinical note, source (single or pair) |
 | `score_product` | Category-specific product quality score by barcode (food / skincare / supplement), each dimension distinct, always with data-quality coverage |
+| `check_stack` | Audit a supplement/ingredient stack in one call — per-item condition-lens verdicts (cited where evidence exists) plus curated within-stack interactions |
+| `find_alternatives` | Find 2–3 safer same-category swaps for a flagged product, rated on Clarity's quality dimensions |
+| `check_recall` | Check whether a consumer product or brand has an active FDA/consumer recall on file (food, supplements, cosmetics — not devices), with classification + source URL |
 
 **Condition lenses:** `breastfeeding`, `lactation`, `pregnancy`, `histamine`,
 `mcas`, `rosacea`, `hs`, `allergy`, `all`.
 
 Anonymous use is rate-limited to 60 req/min per IP (Durable Object limiter); add
 an `X-API-Key` header for higher tiers. Descriptive and cited — **not medical
-advice**; absence of a flag is not proof of safety. Sibling server:
-**Radar** (`com.healthai/radar`) at `https://radar.healthai.com/api/mcp`.
+advice**; absence of a flag is not proof of safety.
+
+## Related servers
+
+- [Constat — 483 Risk Radar](https://github.com/thehealthai/fda-risk-radar-mcp)
+  (`com.healthai/radar`) — FDA/NHTSA regulatory-risk intelligence for AI agents.
+- [MCP Queen](https://github.com/mcpqueen/mcpqueen) — the graded MCP registry
+  that independently probes and grades this server.
 
 ## Deploy (Cloudflare Workers)
 
