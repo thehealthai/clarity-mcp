@@ -1,5 +1,9 @@
 # Clarity MCP — `com.healthai/clarity`
 
+<a href="https://glama.ai/mcp/servers/@thehealthai/clarity-mcp">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@thehealthai/clarity-mcp/badge" alt="Clarity MCP server" />
+</a>
+
 [![MCP Queen grade](https://mcpqueen.com/badge/com.healthai/clarity.svg)](https://mcpqueen.com/s/com.healthai/clarity)
 
 Condition-aware ingredient & product safety intelligence for AI agents. Every
