@@ -1,14 +1,14 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "com.healthai/clarity",
-  "description": "Ingredient, supplement & food safety for agents: verdicts, recall checks, interactions, safer swaps",
   "title": "Clarity by Health AI",
+  "description": "Condition-aware ingredient and product checks for agents, with evidence tiers and citations.",
+  "version": "0.7.8",
+  "websiteUrl": "https://healthai.com/clarity/mcp/",
   "repository": {
     "url": "https://github.com/thehealthai/clarity-mcp",
     "source": "github"
   },
-  "version": "0.7.6",
-  "websiteUrl": "https://healthai.com/clarity/api",
   "remotes": [
     {
       "type": "streamable-http",
